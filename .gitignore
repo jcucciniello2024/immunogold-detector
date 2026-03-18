@@ -1,0 +1,43 @@
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Virtual environments
+.venv/
+project/.venv/
+project/.venv_5d/
+
+# Data and large artifacts (omit dataset)
+project/data/
+project/data/**/*
+
+# Training artifacts
+project/checkpoints/
+project/logs/
+project/benchmark_runs/
+project/benchmark_smoke/
+project/archive/
+project/hpc_eval_results/
+project/hpc_eval_results_remote/
+
+# Generated predictions/visuals
+project/predictions*.csv
+project/debug_*.csv
+project/pred_vis*/
+project/*.png
+project/*.jpg
+project/*.jpeg
+project/*.tif
+project/*.tiff
+
+# Misc local outputs
+*.out
+*.err
