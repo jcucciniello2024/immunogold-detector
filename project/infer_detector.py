@@ -10,6 +10,7 @@ import tifffile
 import torch
 
 from model_unet import UNetKeypointDetector
+from model_unet_deep import UNetDeepKeypointDetector
 from prepare_labels import ID_TO_CLASS, discover_image_records
 
 
@@ -102,17 +103,30 @@ def main() -> None:
     p.add_argument("--tile_w", type=int, default=512)
     p.add_argument("--stride_h", type=int, default=384)
     p.add_argument("--stride_w", type=int, default=384)
-    p.add_argument("--base_channels", type=int, default=24)
-    p.add_argument("--threshold", type=float, default=0.5)
+    p.add_argument("--base_channels", type=int, default=32)
+    p.add_argument("--model_type", type=str, default="unet_deep", choices=["unet", "unet_deep"])
+    p.add_argument("--threshold", type=float, default=0.1)
     p.add_argument("--min_distance", type=int, default=5)
     p.add_argument("--max_detections_per_class", type=int, default=2000)
+    p.add_argument("--use_mantis", action="store_true", help="Apply Mantis local contrast preprocessing")
     p.add_argument("--save_vis", action="store_true", help="Save per-image detection overlays.")
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = UNetKeypointDetector(in_channels=3, out_channels=2, base_channels=args.base_channels).to(device)
+    if args.model_type == "unet_deep":
+        model = UNetDeepKeypointDetector(in_channels=3, out_channels=2, base_channels=args.base_channels).to(device)
+    else:
+        model = UNetKeypointDetector(in_channels=3, out_channels=2, base_channels=args.base_channels).to(device)
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.eval()
+    print(f"Loaded {args.model_type} model from {args.checkpoint}")
+
+    # Setup Mantis preprocessing if requested
+    mantis_filter = None
+    if args.use_mantis:
+        from augmentations import MantisLocalContrast
+        mantis_filter = MantisLocalContrast(kernel_sigma=15.0, strength=0.5)
+        print("Mantis local contrast preprocessing enabled")
 
     if args.save_vis:
         import matplotlib.pyplot as plt
@@ -124,6 +138,9 @@ def main() -> None:
     for r in records:
         img = tifffile.imread(r.image_path)
         chw = image_to_chw_01(img)
+        if mantis_filter is not None:
+            dummy_hm = np.zeros((2, chw.shape[1], chw.shape[2]), dtype=np.float32)
+            chw, _ = mantis_filter(chw, dummy_hm)
         pred = tiled_inference(model, chw, (args.tile_h, args.tile_w), (args.stride_h, args.stride_w), device)
 
         dets_all = []

@@ -13,7 +13,7 @@ import torch
 from torch.utils.data import Dataset
 
 from prepare_labels import ImageRecord, gaussian_heatmap
-from augmentations import apply_augmentation, CLAHEPreprocess, MultiScaleSigmaJitter
+from augmentations import apply_augmentation, CLAHEPreprocess, MantisLocalContrast, MultiScaleSigmaJitter
 
 
 def binary_disk_map(image_hw: Tuple[int, int], points: np.ndarray, radius: int = 3) -> np.ndarray:
@@ -69,12 +69,13 @@ class SlidingWindowPatchDataset(Dataset):
         patch_stride: int = 128,
         samples_per_epoch: int = 256,
         pos_fraction: float = 0.6,
-        sigma: float = 2.5,
+        sigma: float = 1.5,
         target_type: str = "gaussian",
         target_radius: int = 3,
         augment: bool = False,
         seed: int = 42,
         preprocess: bool = False,
+        mantis_preprocess: bool = False,
         sigma_jitter: bool = False,
         consistency_pairs: bool = False,
     ) -> None:
@@ -87,6 +88,7 @@ class SlidingWindowPatchDataset(Dataset):
         self.target_radius = int(target_radius)
         self.augment = augment
         self.preprocess = bool(preprocess)
+        self.mantis_preprocess = bool(mantis_preprocess)
         self.sigma_jitter = bool(sigma_jitter)
         self.consistency_pairs = bool(consistency_pairs)
         self.rng = np.random.default_rng(seed)
@@ -96,6 +98,11 @@ class SlidingWindowPatchDataset(Dataset):
             self.clahe = CLAHEPreprocess(tile_size=64, clip_limit=2.0)
         else:
             self.clahe = None
+
+        if self.mantis_preprocess:
+            self.mantis = MantisLocalContrast(kernel_sigma=15.0, strength=0.5)
+        else:
+            self.mantis = None
 
         # Setup sigma jitter
         if self.sigma_jitter:
@@ -112,6 +119,9 @@ class SlidingWindowPatchDataset(Dataset):
                 if self.preprocess:
                     dummy_hm = np.zeros((2, img.shape[1], img.shape[2]), dtype=np.float32)
                     img, _ = self.clahe(img, dummy_hm)
+                if self.mantis_preprocess:
+                    dummy_hm = np.zeros((2, img.shape[1], img.shape[2]), dtype=np.float32)
+                    img, _ = self.mantis(img, dummy_hm)
                 _, h, w = img.shape
 
                 # Enumerate all sliding window positions
@@ -144,6 +154,9 @@ class SlidingWindowPatchDataset(Dataset):
                 if self.preprocess:
                     dummy_hm = np.zeros((2, img.shape[1], img.shape[2]), dtype=np.float32)
                     img, _ = self.clahe(img, dummy_hm)
+                if self.mantis_preprocess:
+                    dummy_hm = np.zeros((2, img.shape[1], img.shape[2]), dtype=np.float32)
+                    img, _ = self.mantis(img, dummy_hm)
                 p6 = rec.points[0].astype(np.float32)
                 p12 = rec.points[1].astype(np.float32)
                 pall = np.concatenate([p6, p12], axis=0) if (len(p6) + len(p12)) > 0 else np.zeros((0, 2), np.float32)

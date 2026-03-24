@@ -198,10 +198,50 @@ class RandomErasing:
         return image_out, heatmap_out
 
 
-class GaussianBlur:
-    """Gaussian blur for focus/defocus variation in EM."""
+class MantisLocalContrast:
+    """Mantis-style local contrast enhancement for EM images.
 
-    def __init__(self, sigma_range: Tuple[float, float] = (0.5, 2.0)) -> None:
+    Enhances local contrast by subtracting a large-kernel Gaussian blur
+    (local mean) and normalizing by local standard deviation. This makes
+    immunogold particles pop against the background regardless of regional
+    intensity variations.
+    """
+
+    def __init__(self, kernel_sigma: float = 15.0, strength: float = 0.5) -> None:
+        self.kernel_sigma = float(kernel_sigma)
+        self.strength = float(strength)
+
+    def __call__(
+        self, image: np.ndarray, heatmap: np.ndarray, rng: Optional[np.random.Generator] = None
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        image_out = np.zeros_like(image, dtype=np.float32)
+        for ch in range(image.shape[0]):
+            channel = image[ch]
+            local_mean = ndimage.gaussian_filter(channel, sigma=self.kernel_sigma)
+            local_sq_mean = ndimage.gaussian_filter(channel ** 2, sigma=self.kernel_sigma)
+            local_std = np.sqrt(np.maximum(local_sq_mean - local_mean ** 2, 1e-8))
+            enhanced = (channel - local_mean) / (local_std + 1e-8)
+            # Normalize enhanced back to [0, 1]
+            emin, emax = enhanced.min(), enhanced.max()
+            if emax > emin:
+                enhanced = (enhanced - emin) / (emax - emin)
+            else:
+                enhanced = np.zeros_like(enhanced)
+            # Blend original and enhanced
+            image_out[ch] = np.clip(
+                (1.0 - self.strength) * channel + self.strength * enhanced, 0.0, 1.0
+            )
+        return image_out, heatmap
+
+
+class GaussianBlur:
+    """Gaussian blur for focus/defocus variation in EM.
+
+    NOTE: sigma_range is kept very low (0.3-0.8) to avoid destroying
+    small ~1px immunogold particles. Higher values erase the detection signal.
+    """
+
+    def __init__(self, sigma_range: Tuple[float, float] = (0.3, 0.8)) -> None:
         self.sigma_min, self.sigma_max = sigma_range
 
     def __call__(
@@ -278,54 +318,59 @@ def apply_augmentation(
     image: np.ndarray,
     heatmap: np.ndarray,
     rng: np.random.Generator,
-    elastic_p: float = 0.5,
-    gamma_p: float = 0.6,
-    noise_p: float = 0.6,
-    salt_pepper_p: float = 0.4,
-    cutout_p: float = 0.2,
-    blur_p: float = 0.4,
-    brightness_contrast_p: float = 0.7,
-    flip_p: float = 0.1,
-    rot90_p: float = 0.1,
+    elastic_p: float = 0.3,
+    gamma_p: float = 0.5,
+    noise_p: float = 0.5,
+    salt_pepper_p: float = 0.3,
+    cutout_p: float = 0.15,
+    blur_p: float = 0.15,
+    brightness_contrast_p: float = 0.6,
+    flip_p: float = 0.5,
+    rot90_p: float = 0.5,
+    mantis_p: float = 0.3,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Apply EM-realistic augmentation pipeline.
 
-    Augmentations are based on real EM imaging phenomena:
-    - Elastic deform: specimen drift, charging distortions
-    - Gamma/brightness/contrast: beam intensity, detector response variation
-    - Gaussian noise: detector shot noise
-    - Salt & pepper: hot pixels, cosmic rays
-    - Gaussian blur: focus/defocus variations
-    - Cutout: dust particles, small defects
-    - Flips/rot90: kept at low probability for regularization (unrealistic but helps training)
-
-    Args:
-        image: shape (C, H, W), float32, range [0, 1]
-        heatmap: shape (C, H, W), float32, range [0, 1]
-        rng: numpy random generator
-        elastic_p: probability of elastic deformation (realistic)
-        gamma_p: probability of gamma correction (realistic)
-        noise_p: probability of Gaussian noise (realistic)
-        salt_pepper_p: probability of salt & pepper noise (realistic)
-        cutout_p: probability of dust particles (realistic)
-        blur_p: probability of focus blur (realistic)
-        brightness_contrast_p: probability of brightness/contrast (realistic)
-        flip_p: probability of flip (unrealistic but good for regularization)
-        rot90_p: probability of 90-degree rotation (unrealistic but good for regularization)
-
-    Returns:
-        augmented_image, augmented_heatmap (same shapes and dtypes as inputs)
+    Key changes from original:
+    - Flips/rot90 raised to 0.5: EM sections have NO canonical orientation,
+      these are the most physically justified augmentations
+    - Gaussian blur reduced to 0.15 with sigma 0.3-0.8: prevents erasing ~1px particles
+    - Elastic deform reduced to 0.3: strong deform can misalign tiny particles
+    - Mantis local contrast added: enhances particle visibility
     """
+    # GEOMETRIC AUGMENTATIONS FIRST (most impactful, physically justified)
+
+    # Flips — EM has no canonical orientation, these are FREE data diversity
+    if rng.random() < flip_p:
+        image = image[:, :, ::-1].copy()
+        heatmap = heatmap[:, :, ::-1].copy()
+
+    if rng.random() < flip_p:
+        image = image[:, ::-1, :].copy()
+        heatmap = heatmap[:, ::-1, :].copy()
+
+    # 90-degree rotations — same justification as flips
+    if rng.random() < rot90_p:
+        k = int(rng.integers(1, 4))
+        image = np.rot90(image, k=k, axes=(1, 2)).copy()
+        heatmap = np.rot90(heatmap, k=k, axes=(1, 2)).copy()
+
     # REALISTIC EM AUGMENTATIONS
 
     # Elastic deformation (specimen drift, charging effects)
     if rng.random() < elastic_p:
-        elastic = ElasticDeform(alpha=30.0, sigma=5.0)
+        elastic = ElasticDeform(alpha=20.0, sigma=4.0)
         image, heatmap = elastic(image, heatmap, rng)
 
-    # Gaussian blur (focus/defocus variation) - REALISTIC
+    # Mantis local contrast enhancement
+    if rng.random() < mantis_p:
+        strength = float(rng.uniform(0.3, 0.7))
+        mantis = MantisLocalContrast(kernel_sigma=15.0, strength=strength)
+        image, _ = mantis(image, heatmap)
+
+    # Gaussian blur — VERY mild to avoid destroying 1px particles
     if rng.random() < blur_p:
-        blur = GaussianBlur(sigma_range=(0.5, 2.0))
+        blur = GaussianBlur(sigma_range=(0.3, 0.8))
         image, _ = blur(image, heatmap, rng)
 
     # Gamma correction (beam intensity, detector response)
@@ -348,27 +393,12 @@ def apply_augmentation(
         sp = SaltPepperNoise()
         image, _ = sp(image, heatmap, rng)
 
-    # Cutout (dust particles, small defects) - subtle version
+    # Cutout — only zero the image, NOT the heatmap (erasing heatmap
+    # teaches the network that particles don't exist where they do)
     if rng.random() < cutout_p:
         cutout = Cutout(size_frac=1.0/20.0, max_count=1)
-        image, heatmap = cutout(image, heatmap, rng)
-
-    # LOW-PROBABILITY UNREALISTIC AUGMENTATIONS (for regularization)
-
-    # Flips (unrealistic but help prevent orientation bias)
-    if rng.random() < flip_p:
-        image = image[:, :, ::-1].copy()
-        heatmap = heatmap[:, :, ::-1].copy()
-
-    if rng.random() < flip_p:
-        image = image[:, ::-1, :].copy()
-        heatmap = heatmap[:, ::-1, :].copy()
-
-    # 90-degree rotations (unrealistic but help prevent rotation bias)
-    if rng.random() < rot90_p:
-        k = int(rng.integers(1, 4))
-        image = np.rot90(image, k=k, axes=(1, 2)).copy()
-        heatmap = np.rot90(heatmap, k=k, axes=(1, 2)).copy()
+        image_out, _ = cutout(image, heatmap, rng)
+        image = image_out
 
     return image, heatmap
 
