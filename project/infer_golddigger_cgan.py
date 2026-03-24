@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 from typing import List, Tuple
 
 import numpy as np
@@ -54,6 +55,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max_area_6nm", type=int, default=150)
     p.add_argument("--min_area_12nm", type=int, default=8)
     p.add_argument("--max_area_12nm", type=int, default=250)
+    p.add_argument("--out_vis_dir", type=str, default="golddigger_vis")
+    p.add_argument("--save_vis", action="store_true", help="Save EM + detection overlays per image.")
+    p.add_argument(
+        "--save_heatmap",
+        action="store_true",
+        help="Save predicted mask channels (6nm / 12nm) and max-projection heatmap.",
+    )
     return p.parse_args()
 
 
@@ -63,6 +71,11 @@ def main() -> None:
     model = GoldDiggerGenerator(in_channels=3, out_channels=2, base_channels=64).to(device)
     model.load_state_dict(torch.load(args.generator_ckpt, map_location=device))
     model.eval()
+
+    if args.save_vis or args.save_heatmap:
+        import matplotlib.pyplot as plt
+
+        os.makedirs(args.out_vis_dir, exist_ok=True)
 
     records = discover_image_records(args.data_root)
     rows: List[List[str]] = [["image_id", "x", "y", "class_id", "confidence"]]
@@ -94,10 +107,69 @@ def main() -> None:
         for x, y, conf in det12:
             rows.append([r.image_id, f"{x:.2f}", f"{y:.2f}", "1", f"{conf:.6f}"])
 
+        if args.save_vis:
+            import matplotlib.pyplot as plt
+
+            vis = np.transpose(chw, (1, 2, 0))
+            plt.figure(figsize=(7, 7))
+            plt.imshow(vis)
+            if det6:
+                plt.scatter(
+                    [d[0] for d in det6],
+                    [d[1] for d in det6],
+                    s=18,
+                    c="cyan",
+                    marker="x",
+                    linewidths=0.9,
+                    label="6 nm",
+                )
+            if det12:
+                plt.scatter(
+                    [d[0] for d in det12],
+                    [d[1] for d in det12],
+                    s=18,
+                    c="magenta",
+                    marker="+",
+                    linewidths=0.9,
+                    label="12 nm",
+                )
+            if det6 or det12:
+                plt.legend(loc="upper right", fontsize=8)
+            plt.title(f"{r.image_id} GoldDigger (cyan=6nm, magenta=12nm)")
+            plt.axis("off")
+            plt.tight_layout()
+            plt.savefig(os.path.join(args.out_vis_dir, f"{r.image_id}_golddigger_detections.png"), dpi=150)
+            plt.close()
+
+        if args.save_heatmap:
+            import matplotlib.pyplot as plt
+
+            vis = np.transpose(chw, (1, 2, 0))
+            p6, p12 = pred[0], pred[1]
+            vmax = max(0.2, float(max(p6.max(), p12.max())))
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            axes[0].imshow(vis, cmap="gray")
+            axes[0].set_title("EM")
+            axes[0].axis("off")
+            im1 = axes[1].imshow(p6, cmap="magma", vmin=0.0, vmax=vmax)
+            axes[1].set_title("6 nm channel (sigmoid)")
+            axes[1].axis("off")
+            fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+            im2 = axes[2].imshow(p12, cmap="magma", vmin=0.0, vmax=vmax)
+            axes[2].set_title("12 nm channel (sigmoid)")
+            axes[2].axis("off")
+            fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+            fig.suptitle(f"{r.image_id}: Gold Digger cGAN masks")
+            fig.tight_layout()
+            fig.savefig(os.path.join(args.out_vis_dir, f"{r.image_id}_golddigger_heatmap.png"), dpi=150)
+            plt.close(fig)
+
     with open(args.out_csv, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerows(rows)
     print(f"Saved detections to {args.out_csv}")
+    if args.save_vis or args.save_heatmap:
+        print(f"Saved visualizations under {args.out_vis_dir}/")
 
 
 if __name__ == "__main__":
